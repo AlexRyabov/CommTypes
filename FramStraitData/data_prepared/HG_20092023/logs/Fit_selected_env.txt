@@ -1,0 +1,72 @@
+
+
+Field	nitrite
+cvLoss	0.205765
+Rel_cvLoss	0.406599
+trainLoss	0.167057
+Rel_trainLoss	0.330110
+
+Variables	Importance
+cond	0.271634
+Depth	0.221843
+temp	0.169342
+Lon	0.114680
+mod_aq_sst	0.087278
+sea_ice_week_before	0.082482
+Month_doy	0.044778
+sea_ice_now	0.035548
+mod_aq_par	-0.027586
+
+
+Field	ammonium
+cvLoss	0.478140
+Rel_cvLoss	0.671557
+trainLoss	0.399356
+Rel_trainLoss	0.560903
+
+Variables	Importance
+Lon	0.359413
+cond	0.279683
+Depth	0.153870
+mod_aq_sst	0.083719
+temp	0.056075
+sea_ice_now	0.031966
+mod_aq_par	0.019077
+Month_doy	0.013573
+sea_ice_week_before	0.002625
+
+
+Field	silicate
+cvLoss	0.950046
+Rel_cvLoss	0.820577
+trainLoss	0.592504
+Rel_trainLoss	0.511760
+
+Variables	Importance
+mod_aq_par	0.704275
+Depth	0.220782
+temp	0.026669
+Lon	0.018804
+cond	0.015532
+Month_doy	0.013920
+sea_ice_week_before	0.000018
+sea_ice_now	0.000000
+mod_aq_sst	0.000000
+
+
+Field	phosphate
+cvLoss	0.027305
+Rel_cvLoss	0.113215
+trainLoss	0.023137
+Rel_trainLoss	0.095935
+
+Variables	Importance
+Depth	0.570242
+temp	0.170879
+mod_aq_par	0.162048
+Month_doy	0.048120
+cond	0.029121
+mod_aq_sst	0.011853
+Lon	0.007379
+sea_ice_week_before	0.000333
+sea_ice_now	0.000024

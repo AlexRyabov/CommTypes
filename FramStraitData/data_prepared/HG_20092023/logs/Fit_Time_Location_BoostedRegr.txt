@@ -1,0 +1,49 @@
+
+
+Field	mod_aq_par
+cvLoss	40.881933
+Rel_cvLoss	3.067689
+trainLoss	22.418984
+Rel_trainLoss	1.682271
+
+
+Field	temp
+cvLoss	3.393008
+Rel_cvLoss	1.234888
+trainLoss	2.400379
+Rel_trainLoss	0.873620
+
+
+Field	nitrate
+cvLoss	1.600544
+Rel_cvLoss	0.743744
+trainLoss	1.138205
+Rel_trainLoss	0.528903
+
+
+Field	nitrite
+cvLoss	0.196553
+Rel_cvLoss	0.411938
+trainLoss	0.159199
+Rel_trainLoss	0.333651
+
+
+Field	ammonium
+cvLoss	0.473388
+Rel_cvLoss	0.669142
+trainLoss	0.372738
+Rel_trainLoss	0.526871
+
+
+Field	silicate
+cvLoss	0.867973
+Rel_cvLoss	0.779229
+trainLoss	0.543506
+Rel_trainLoss	0.487937
+
+
+Field	phosphate
+cvLoss	0.025640
+Rel_cvLoss	0.109534
+trainLoss	0.020764
+Rel_trainLoss	0.088703

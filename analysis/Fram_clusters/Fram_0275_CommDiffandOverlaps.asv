@@ -1,0 +1,645 @@
+% Fram_0272_BubbleHeatmap_PairwiseContrasts.m
+%
+% Compare community types by coherent taxonomic differences
+%
+% Panel C:
+% Bubble heatmap of characteristic taxa across community types
+% Color = enrichment relative to overall mean abundance
+% Dot size = prevalence within community type
+%
+% Panel D:
+% Pairwise succession contrasts
+% Contrast = log10((mean abundance * prevalence in later type) /
+%                  (mean abundance * prevalence in earlier type))
+%
+% Requirements:
+% Data.tSamplesNorm
+% Data.tStPredictors
+% Data.tPhylaRoles
+% DI.idxSamplCols
+%
+% tSamplesNorm:
+% first columns contain taxonomy, sample columns start at DI.idxSamplCols.
+% sample columns must be in the same order as rows of tStPredictors and tDMC.
+%
+% tDMC:
+% table with ClustID for each sample, same row order as tStPredictors.
+
+clearvars
+proj_Initialize;
+
+%% Load data
+
+[Data, DI] = dt_loadData(HGP, []);
+
+tSamplesNorm  = Data.tSamplesNorm;
+tStPredictors = Data.tStPredictors;
+tPhylaRoles   = Data.tPhylaRoles;
+
+idxSamplCols = DI.idxSamplCols;
+
+% Cluster assignment table
+% Change this line if your tDMC is stored elsewhere
+tDMC = readtable(fullfile(HGP.Data.Path2ResultsData, 'Samples_DMC_clustID.xlsx'));
+
+if ~ismember('ClustID', tDMC.Properties.VariableNames)
+    error('Column ClustID was not found in tDMC.');
+end
+
+K = max(tDMC.ClustID);
+
+%% Parameters
+
+% Taxonomic level for visualization
+GroupName = 'Genus';
+% GroupName = 'Family';
+% GroupName = 'Order';
+% GroupName = 'Species';
+
+% Use only active phyla from Data.tPhylaRoles
+useOnlyActivePhyla = true;
+
+% Detection threshold for prevalence
+% A taxon is treated as present if abundance > detectionThr
+detectionThr = 0;
+
+% Small value to avoid log(0)
+epsVal = 1e-8;
+
+% Panel C settings
+topN_taxa = 40;
+minMaxPrevalence = 0.20;
+minMaxMeanAbund  = 1e-4;
+enrichCLim = 2;
+
+% Panel D settings
+pairs = [2 3;
+         3 4;
+         4 5;
+         7 8];
+
+topN_pair = 12;
+minPairPrevalence = 0.20;
+minPairMeanAbund  = 1e-4;
+
+% Figure export
+saveFigures = true;
+figExt = '.png';
+
+%% Prepare phylum table
+
+if useOnlyActivePhyla
+    tPhylaRoles = tPhylaRoles(tPhylaRoles.Active == 1, :);
+end
+
+if ismember('Oder', tPhylaRoles.Properties.VariableNames)
+    tPhylaRoles = sortrows(tPhylaRoles, 'Oder');
+else
+    warning('Column Oder was not found in tPhylaRoles. Phyla will keep original order.');
+end
+
+phylaOrdered = string(tPhylaRoles.Phylum);
+phylaOrdered = strip(phylaOrdered);
+
+%% Optional: simplify some taxonomic names
+
+if true
+    tSamplesNorm = cleandata_unifyNames(tSamplesNorm, "Species", "Dino-Group-II-", "Dino-Group-II-Clades");
+    tSamplesNorm = cleandata_unifyNames(tSamplesNorm, "Genus",   "Dino-Group-II-", "Dino-Group-II-Clades");
+    tSamplesNorm = cleandata_unifyNames(tSamplesNorm, "Family",  "Dino-Group-II-", "Dino-Group-II-Clades");
+
+    tSamplesNorm = cleandata_unifyNames(tSamplesNorm, "Species", "Dino-Group-I-", "Dino-Group-I-Clades");
+    tSamplesNorm = cleandata_unifyNames(tSamplesNorm, "Genus",   "Dino-Group-I-", "Dino-Group-I-Clades");
+    tSamplesNorm = cleandata_unifyNames(tSamplesNorm, "Family",  "Dino-Group-I-", "Dino-Group-I-Clades");
+end
+
+%% Aggregate taxa by Phylum + selected taxonomic level
+
+[taxaNames, displayNames, X, taxInfo] = local_aggregateTaxa( ...
+    tSamplesNorm, idxSamplCols, GroupName, phylaOrdered);
+
+% X is taxa x samples
+nTaxa = size(X, 1);
+nSamples = size(X, 2);
+
+if height(tDMC) ~= nSamples
+    error('Number of rows in tDMC does not match number of sample columns in tSamplesNorm.');
+end
+
+if height(tStPredictors) ~= nSamples
+    warning('Number of rows in tStPredictors does not match number of sample columns in tSamplesNorm.');
+end
+
+%% Add role information to taxInfo
+
+taxInfo.RoleName = strings(height(taxInfo), 1);
+taxInfo.Role     = strings(height(taxInfo), 1);
+
+for i = 1:height(taxInfo)
+    idxRole = string(tPhylaRoles.Phylum) == string(taxInfo.Phylum(i));
+
+    if any(idxRole)
+        idxFirst = find(idxRole, 1, 'first');
+
+        taxInfo.RoleName(i) = string(tPhylaRoles.RoleName{idxFirst});
+        taxInfo.Role(i)     = string(tPhylaRoles.Role{idxFirst});
+    else
+        taxInfo.RoleName(i) = "Unknown";
+        taxInfo.Role(i)     = "u";
+    end
+end
+
+%% Colors
+
+if exist('f_Clrs_fresh', 'file')
+    clrs = f_Clrs_fresh(K);
+else
+    clrs = lines(K);
+end
+
+% Colors for functional roles
+roleClrs = containers.Map;
+
+roleClrs('Autotroph')   = [0.10 0.55 0.20];
+roleClrs('Mixotroph')   = [0.45 0.35 0.80];
+roleClrs('Zooplankton') = [0.85 0.45 0.10];
+roleClrs('Parasite')    = [0.75 0.10 0.10];
+roleClrs('Recycler')    = [0.35 0.35 0.35];
+roleClrs('Unknown')     = [0.00 0.00 0.00];
+
+%% Calculate mean abundance and prevalence per community type
+
+meanAbund = nan(nTaxa, K);
+prevalence = nan(nTaxa, K);
+nSamplesType = nan(K, 1);
+
+for k = 1:K
+    idx = tDMC.ClustID == k;
+    nSamplesType(k) = sum(idx);
+
+    meanAbund(:, k) = mean(X(:, idx), 2, 'omitnan');
+    prevalence(:, k) = mean(X(:, idx) > detectionThr, 2, 'omitnan');
+end
+
+overallMeanAbund = mean(X, 2, 'omitnan');
+
+% Enrichment relative to the average abundance across all samples
+enrichment = log10((meanAbund + epsVal) ./ (overallMeanAbund + epsVal));
+
+%% Select taxa for Panel C
+
+% Coherent enrichment score:
+% high if taxon is enriched and prevalent in at least one community type
+coherenceScore = max(abs(enrichment) .* prevalence, [], 2);
+
+okTaxa = max(prevalence, [], 2) >= minMaxPrevalence & ...
+         max(meanAbund, [], 2) >= minMaxMeanAbund & ...
+         ~ismissing(taxaNames) & taxaNames ~= "" & taxaNames ~= "NA";
+
+coherenceScore(~okTaxa) = -inf;
+
+nAvailable = sum(isfinite(coherenceScore));
+
+if nAvailable == 0
+    error('No taxa passed the Panel C filters. Reduce minMaxPrevalence or minMaxMeanAbund.');
+end
+
+[~, ord] = sort(coherenceScore, 'descend');
+selTaxa = ord(1:min(topN_taxa, nAvailable));
+
+% Display selected taxa in biological order:
+% phylum order from tPhylaRoles, then taxon name
+tSel = taxInfo(selTaxa, :);
+[~, srt] = sortrows(tSel, {'PhylumOrder', 'TaxonName'});
+selTaxa = selTaxa(srt);
+
+%% Panel C: bubble heatmap
+%% Panel C: bubble heatmap
+
+%% Panel C: bubble heatmap
+
+fgC = figure('Color', 'w', 'Position', [50 60 1250 950]);
+
+axC = axes(fgC);
+hold(axC, 'on');
+
+% Larger left margin for long taxon names
+axC.Position = [0.26 0.10 0.54 0.82];
+
+E = enrichment(selTaxa, :);
+P = prevalence(selTaxa, :);
+
+[yGrid, xGrid] = ndgrid(1:numel(selTaxa), 1:K);
+dotSize = 15 + 260 * P(:);
+
+scatter(axC, xGrid(:), yGrid(:), dotSize, E(:), ...
+    'filled', ...
+    'MarkerEdgeColor', [0.25 0.25 0.25], ...
+    'LineWidth', 0.25);
+
+set(axC, 'YDir', 'reverse');
+
+xlim(axC, [0.5 K + 1.25]);
+ylim(axC, [0.5 numel(selTaxa) + 0.5]);
+
+xticks(axC, 1:K);
+xticklabels(axC, compose('Type %d', 1:K));
+
+yticks(axC, 1:numel(selTaxa));
+yticklabels(axC, displayNames(selTaxa));
+
+axC.TickLabelInterpreter = 'none';
+axC.FontSize = 8;
+
+xlabel(axC, 'Community type');
+ylabel(axC, [GroupName ' (Phylum-Taxon)']);
+title(axC, 'Characteristic taxa across community types');
+
+colormap(axC, local_blueWhiteRed(256));
+cb = colorbar(axC);
+cb.Label.String = 'log_{10}(mean abundance in type / overall mean abundance)';
+clim(axC, [-enrichCLim enrichCLim]);
+
+% Move colorbar slightly to the right
+cb.Position = [0.84 0.12 0.018 0.78];
+
+% No grid lines
+grid(axC, 'off');
+box(axC, 'on');
+
+% Add horizontal separators only between phyla
+phylaC = string(taxInfo.Phylum(selTaxa));
+
+for ii = 1:(numel(selTaxa)-1)
+    if phylaC(ii) ~= phylaC(ii+1)
+        yline(axC, ii + 0.5, '-', ...
+            'Color', [0.25 0.25 0.25], ...
+            'LineWidth', 0.9);
+    end
+end
+
+% Add phylum names on the right side only
+uniquePhylaC = unique(phylaC, 'stable');
+
+for iP = 1:numel(uniquePhylaC)
+    idxP = find(phylaC == uniquePhylaC(iP));
+    yMid = mean(idxP);
+
+    text(axC, K + 0.23, yMid, uniquePhylaC(iP), ...
+        'HorizontalAlignment', 'left', ...
+        'VerticalAlignment', 'middle', ...
+        'FontSize', 8, ...
+        'FontWeight', 'bold', ...
+        'Interpreter', 'none');
+end
+
+% Add sample numbers above columns
+yl = ylim(axC);
+
+for k = 1:K
+    text(axC, k, yl(1) - 0.7, ['n=' num2str(nSamplesType(k))], ...
+        'HorizontalAlignment', 'center', ...
+        'VerticalAlignment', 'bottom', ...
+        'FontSize', 8);
+end
+
+% Prevalence legend outside the main axes
+axLeg = axes(fgC, 'Position', [0.88 0.12 0.09 0.22]);
+hold(axLeg, 'on');
+
+prevVals = [0.25 0.50 0.75 1.00];
+sizes = 15 + 260 * prevVals;
+
+for i = 1:numel(prevVals)
+    scatter(axLeg, 1, i, sizes(i), ...
+        [0.75 0.75 0.75], ...
+        'filled', ...
+        'MarkerEdgeColor', [0.25 0.25 0.25], ...
+        'LineWidth', 0.25);
+
+    text(axLeg, 1.35, i, num2str(prevVals(i), '%.2f'), ...
+        'VerticalAlignment', 'middle', ...
+        'FontSize', 8);
+end
+
+title(axLeg, 'Prevalence', 'FontSize', 9);
+xlim(axLeg, [0.7 2.2]);
+ylim(axLeg, [0.5 numel(prevVals) + 0.5]);
+set(axLeg, 'YDir', 'reverse');
+axis(axLeg, 'off');
+
+%% Save table for Panel C
+
+tBubble = taxInfo(selTaxa, :);
+tBubble.Score = coherenceScore(selTaxa);
+
+for k = 1:K
+    tBubble.(['MeanAbund_Type' num2str(k)]) = meanAbund(selTaxa, k);
+    tBubble.(['Prevalence_Type' num2str(k)]) = prevalence(selTaxa, k);
+    tBubble.(['Enrichment_Type' num2str(k)]) = enrichment(selTaxa, k);
+end
+
+outTableC = fullfile(HGP.Data.Path2ResultsData, ...
+    ['BubbleHeatmap_' GroupName '.xlsx']);
+
+writetable(tBubble, outTableC);
+
+if saveFigures
+    outFigC = fullfile(HGP.Data.Path2ResultsData, ...
+        ['BubbleHeatmap_' GroupName figExt]);
+    exportgraphics(fgC, outFigC, 'Resolution', 300);
+end
+
+%% Panel D: pairwise succession contrasts
+
+%% Panel D: pairwise succession contrasts
+
+fgD = figure('Color', 'w', 'Position', [80 60 1500 850]);
+tlD = tiledlayout(2, 2, 'Padding', 'compact', 'TileSpacing', 'compact');
+
+allPairTables = table;
+
+for iPair = 1:size(pairs, 1)
+
+    typeA = pairs(iPair, 1);
+    typeB = pairs(iPair, 2);
+
+    % Later / earlier contrast
+    contrast = log10(((meanAbund(:, typeB) .* prevalence(:, typeB)) + epsVal) ./ ...
+                     ((meanAbund(:, typeA) .* prevalence(:, typeA)) + epsVal));
+
+    okPair = max(prevalence(:, [typeA typeB]), [], 2) >= minPairPrevalence & ...
+             max(meanAbund(:, [typeA typeB]), [], 2) >= minPairMeanAbund & ...
+             isfinite(contrast) & ...
+             ~ismissing(taxaNames) & taxaNames ~= "" & taxaNames ~= "NA";
+
+    pairScore = abs(contrast);
+    pairScore(~okPair) = -inf;
+
+    nAvailablePair = sum(isfinite(pairScore));
+
+    if nAvailablePair == 0
+        warning('No taxa passed filters for Type %d -> Type %d.', typeA, typeB);
+        continue
+    end
+
+    [~, ordPair] = sort(pairScore, 'descend');
+    selPair = ordPair(1:min(topN_pair, nAvailablePair));
+
+    % Sort by phylum order, then taxon name
+    tSelPair = taxInfo(selPair, :);
+    [~, srtPair] = sortrows(tSelPair, {'PhylumOrder', 'TaxonName'});
+    selPair = selPair(srtPair);
+
+    contrastPlot = contrast(selPair);
+    y = 1:numel(selPair);
+
+    axD = nexttile;
+    hold(axD, 'on');
+
+    bh = barh(axD, y, contrastPlot, ...
+        'FaceColor', 'flat', ...
+        'EdgeColor', 'none');
+
+    for ii = 1:numel(selPair)
+        if contrastPlot(ii) >= 0
+            bh.CData(ii, :) = clrs(typeB, :);
+        else
+            bh.CData(ii, :) = clrs(typeA, :);
+        end
+    end
+
+    xline(axD, 0, 'k-', 'LineWidth', 0.8);
+
+    xMax = max(abs(contrastPlot), [], 'omitnan');
+    if isempty(xMax) || xMax == 0 || isnan(xMax)
+        xMax = 1;
+    end
+
+    xlim(axD, [-1.35*xMax, 1.55*xMax]);
+    ylim(axD, [0.5 numel(selPair) + 0.5]);
+
+    yticks(axD, y);
+    yticklabels(axD, displayNames(selPair));
+    axD.TickLabelInterpreter = 'none';
+    axD.FontSize = 7.5;
+
+    xlabel(axD, ['log_{10}((mean abundance \times prevalence) Type ' ...
+        num2str(typeB) ' / Type ' num2str(typeA) ')']);
+
+    title(axD, ['Type ' num2str(typeA) ' \rightarrow Type ' num2str(typeB)]);
+
+    % No grid lines
+    grid(axD, 'off');
+    box(axD, 'on');
+
+    % Add prevalence marker at bar end
+    prevEnriched = nan(numel(selPair), 1);
+
+    for ii = 1:numel(selPair)
+        if contrastPlot(ii) >= 0
+            prevEnriched(ii) = prevalence(selPair(ii), typeB);
+        else
+            prevEnriched(ii) = prevalence(selPair(ii), typeA);
+        end
+    end
+
+    scatter(axD, contrastPlot, y, 30 + 120 * prevEnriched, ...
+        'k', 'filled', ...
+        'MarkerFaceAlpha', 0.35, ...
+        'MarkerEdgeColor', 'none');
+
+    % Add horizontal separators only between phyla
+    phylaD = string(taxInfo.Phylum(selPair));
+
+    for ii = 1:(numel(selPair)-1)
+        if phylaD(ii) ~= phylaD(ii+1)
+            yline(axD, ii + 0.5, '-', ...
+                'Color', [0.25 0.25 0.25], ...
+                'LineWidth', 0.8);
+        end
+    end
+
+    % Add phylum names on the right side only
+    uniquePhylaD = unique(phylaD, 'stable');
+    xl = xlim(axD);
+
+    for iP = 1:numel(uniquePhylaD)
+        idxP = find(phylaD == uniquePhylaD(iP));
+        yMid = mean(idxP);
+
+        text(axD, xl(2) - 0.02 * range(xl), yMid, uniquePhylaD(iP), ...
+            'HorizontalAlignment', 'right', ...
+            'VerticalAlignment', 'middle', ...
+            'FontSize', 7, ...
+            'FontWeight', 'bold', ...
+            'Interpreter', 'none');
+    end
+
+    % Save pair table
+    tPair = taxInfo(selPair, :);
+    tPair.Pair = repmat(string(['Type' num2str(typeA) '_vs_Type' num2str(typeB)]), numel(selPair), 1);
+    tPair.TypeA = repmat(typeA, numel(selPair), 1);
+    tPair.TypeB = repmat(typeB, numel(selPair), 1);
+    tPair.Contrast_LaterOverEarlier = contrast(selPair);
+    tPair.MeanAbund_A = meanAbund(selPair, typeA);
+    tPair.MeanAbund_B = meanAbund(selPair, typeB);
+    tPair.Prevalence_A = prevalence(selPair, typeA);
+    tPair.Prevalence_B = prevalence(selPair, typeB);
+    tPair.Score = abs(contrast(selPair));
+
+    allPairTables = [allPairTables; tPair]; %#ok<AGROW>
+end
+
+%% Optional: role legend
+
+fgRole = figure('Color', 'w', 'Position', [200 200 360 230]);
+hold on
+
+roleKeys = keys(roleClrs);
+
+for i = 1:numel(roleKeys)
+    scatter(1, i, 90, roleClrs(roleKeys{i}), 'filled');
+    text(1.15, i, roleKeys{i}, ...
+        'VerticalAlignment', 'middle', ...
+        'FontSize', 10, ...
+        'Interpreter', 'none');
+end
+
+xlim([0.8 2.7]);
+ylim([0.5 numel(roleKeys)+0.5]);
+set(gca, 'YDir', 'reverse');
+axis off
+title('Functional role');
+
+if saveFigures
+    outFigRole = fullfile(HGP.Data.Path2ResultsData, ...
+        ['TaxonRoleLegend_' GroupName figExt]);
+    exportgraphics(fgRole, outFigRole, 'Resolution', 300);
+end
+
+disp('Finished.');
+disp(['Saved Panel C table: ' outTableC]);
+disp(['Saved Panel D table: ' outTableD]);
+
+%% Local functions
+
+function [taxaNames, displayNames, Xagg, taxInfo] = local_aggregateTaxa(T, idxSamplCols, GroupName, phylaOrdered)
+
+    % Extract abundance matrix
+    X = table2array(T(:, idxSamplCols));
+    X = double(X);
+
+    % Extract phylum and selected taxonomic level
+    phylumRaw = string(T.Phylum);
+    phylumRaw = strip(phylumRaw);
+
+    if ~ismember(GroupName, T.Properties.VariableNames)
+        error('Column %s was not found in tSamplesNorm.', GroupName);
+    end
+
+    taxaRaw = string(T.(GroupName));
+    taxaRaw = strip(taxaRaw);
+
+    % Keep only phyla present in phylaOrdered
+    idxKeep = ismember(phylumRaw, phylaOrdered);
+
+    phylumRaw = phylumRaw(idxKeep);
+    taxaRaw   = taxaRaw(idxKeep);
+    X         = X(idxKeep, :);
+
+    % Remove missing or empty taxa names
+    idxGood = ~(ismissing(taxaRaw) | taxaRaw == "" | taxaRaw == "NA" | taxaRaw == "NaN" | taxaRaw == "<missing>");
+    phylumRaw = phylumRaw(idxGood);
+    taxaRaw   = taxaRaw(idxGood);
+    X         = X(idxGood, :);
+
+    % Aggregate by Phylum + TaxonName
+    key = phylumRaw + "||" + taxaRaw;
+    keyUnique = unique(key, 'stable');
+
+    nOut = numel(keyUnique);
+    nSamples = size(X, 2);
+
+    Xagg = zeros(nOut, nSamples);
+    phylumOut = strings(nOut, 1);
+    taxaOut   = strings(nOut, 1);
+
+    for i = 1:nOut
+        idx = key == keyUnique(i);
+
+        Xagg(i, :) = sum(X(idx, :), 1, 'omitnan');
+
+        firstIdx = find(idx, 1, 'first');
+        phylumOut(i) = phylumRaw(firstIdx);
+        taxaOut(i)   = taxaRaw(firstIdx);
+    end
+
+    % Determine phylum order from tPhylaRoles
+    phylumOrder = nan(nOut, 1);
+
+    for i = 1:nOut
+        phylumOrder(i) = find(phylaOrdered == phylumOut(i), 1, 'first');
+    end
+
+    displayNames = phylumOut + "-" + taxaOut;
+
+    taxInfo = table(phylumOrder, phylumOut, taxaOut, displayNames, ...
+        'VariableNames', {'PhylumOrder','Phylum','TaxonName','DisplayName'});
+
+    % Sort by phylum order and taxon name
+    [taxInfo, sortIdx] = sortrows(taxInfo, {'PhylumOrder','TaxonName'});
+    Xagg = Xagg(sortIdx, :);
+
+    taxaNames    = taxInfo.TaxonName;
+    displayNames = taxInfo.DisplayName;
+end
+
+function cmap = local_blueWhiteRed(n)
+
+    if nargin < 1
+        n = 256;
+    end
+
+    n1 = floor(n / 2);
+    n2 = n - n1;
+
+    blue  = [0.2 0.35 0.8];
+    white = [1 1 1];
+    red   = [0.8 0.2 0.15];
+
+    cmap1 = [linspace(blue(1), white(1), n1)', ...
+             linspace(blue(2), white(2), n1)', ...
+             linspace(blue(3), white(3), n1)'];
+
+    cmap2 = [linspace(white(1), red(1), n2)', ...
+             linspace(white(2), red(2), n2)', ...
+             linspace(white(3), red(3), n2)'];
+
+    cmap = [cmap1; cmap2];
+end
+
+function local_addPrevalenceLegend(ax, x0, y0)
+
+    axes(ax); %#ok<LAXES>
+    hold on
+
+    prevVals = [0.25 0.50 0.75 1.00];
+    sizes = 15 + 260 * prevVals;
+
+    for i = 1:numel(prevVals)
+        scatter(x0, y0 + i - 1, sizes(i), ...
+            [0.75 0.75 0.75], ...
+            'filled', ...
+            'MarkerEdgeColor', [0.25 0.25 0.25], ...
+            'LineWidth', 0.25);
+
+        text(x0 + 0.25, y0 + i - 1, num2str(prevVals(i), '%.2f'), ...
+            'VerticalAlignment', 'middle', ...
+            'FontSize', 8);
+    end
+
+    text(x0 - 0.15, y0 - 0.8, 'Prevalence', ...
+        'FontSize', 8, ...
+        'FontWeight', 'bold');
+end

@@ -1,0 +1,547 @@
+% Fram_0277_CoreSpecContribution_fs2.m
+%
+% Threshold-based ridge feature selection.
+% The script sweeps a feature-selection threshold and reports hold-out
+% test R2_log separately for each community type.
+
+clearvars
+proj_Initialize;
+
+%% Load data
+
+[Data, DI] = dt_loadData(HGP, []); 
+
+tStPredictors = Data.tStPredictors;
+tDMC = readtable(fullfile(HGP.Data.Path2ResultsData, 'Samples_DMC_clustID.xlsx'));
+
+coreDataFile = fullfile(HGP.Data.Path2ResultsData, 'CommTypeCoreSpeciesData.mat');
+
+if ~isfile(coreDataFile)
+    error(['Core species data file was not found: %s\n' ...
+        'Run Fram_0275_CommDiffandOverlaps first.'], coreDataFile);
+end
+
+S = load(coreDataFile, 'coreSpeciesData');
+coreSpeciesData = S.coreSpeciesData;
+
+if ~ismember('ClustID', tDMC.Properties.VariableNames)
+    error('Column ClustID was not found in tDMC.');
+end
+
+if ~ismember('chlorophyll_a_0', tStPredictors.Properties.VariableNames)
+    error('Column chlorophyll_a_0 was not found in tStPredictors.');
+end
+
+nSamples = size(coreSpeciesData.Abundance, 1);
+
+if height(tDMC) ~= nSamples
+    error('Number of rows in tDMC does not match the core species abundance matrix.');
+end
+
+if height(tStPredictors) ~= nSamples
+    error('Number of rows in tStPredictors does not match the core species abundance matrix.');
+end
+
+%% Parameters
+
+Fram_0277_CoreSpecContribution_init;
+
+thresholdGrid = logspace(-6, -1, 50);
+thresholdSelectionMetric = "contribution"; % "coefficient" or "contribution"
+finalThreshold = 0.0023;
+minSelectedPredictors = 1;
+
+speciesNames = string(coreSpeciesData.Species(:));
+speciesPhyla = string(coreSpeciesData.Phylum(:));
+speciesRoles = string(coreSpeciesData.Role(:));
+
+if isfield(coreSpeciesData, 'PlotName')
+    speciesPlotNames = string(coreSpeciesData.PlotName(:));
+else
+    speciesPlotNames = speciesNames;
+end
+
+predictorNames = matlab.lang.makeValidName(speciesNames);
+predictorNames = matlab.lang.makeUniqueStrings(predictorNames); %#ok<NASGU>
+
+%% Preprocess abundance and chlorophyll
+
+Xraw = double(coreSpeciesData.Abundance);
+coreSpeciesRowSum = sum(Xraw, 2, 'omitnan');
+idxZeroCoreSpeciesRows = coreSpeciesRowSum <= 0 | isnan(coreSpeciesRowSum);
+
+if any(idxZeroCoreSpeciesRows)
+    warning('%d samples have zero or invalid total abundance across core species and will be excluded.', ...
+        nnz(idxZeroCoreSpeciesRows));
+end
+
+Xraw(~idxZeroCoreSpeciesRows, :) = Xraw(~idxZeroCoreSpeciesRows, :) ./ coreSpeciesRowSum(~idxZeroCoreSpeciesRows);
+Xraw(idxZeroCoreSpeciesRows, :) = NaN;
+
+YoriginalAll = tStPredictors.chlorophyll_a_0;
+clustIDAll = tDMC.ClustID(:);
+communityTypes = sort(unique(clustIDAll(:)))';
+
+switch modelAbundanceTransform
+    case "clr"
+        XmodelAll = local_clrTransformAbundance(Xraw);
+    case "none"
+        XmodelAll = Xraw;
+    case "power025"
+        XmodelAll = local_powerTransformAbundance(Xraw, 0.25);
+    case "power05"
+        XmodelAll = local_powerTransformAbundance(Xraw, 0.5);
+    otherwise
+        error('Unknown modelAbundanceTransform: %s.', modelAbundanceTransform);
+end
+
+validRows = ~isnan(YoriginalAll) & YoriginalAll > 0 & all(~isnan(XmodelAll), 2);
+
+X = XmodelAll(validRows, :);
+Yoriginal = YoriginalAll(validRows);
+Y = chlTransform(Yoriginal);
+clustID = clustIDAll(validRows);
+cruiseID = tStPredictors.Cruise(validRows);
+monthNum = tStPredictors.MonthNum(validRows);
+
+%% Hold-out split
+
+idxTest = false(size(Y));
+
+for iType = 1:numel(communityTypes)
+    idxType = find(clustID == communityTypes(iType));
+    nTestType = max(1, round(holdoutFraction * numel(idxType)));
+    idxType = idxType(randperm(numel(idxType)));
+    idxTest(idxType(1:nTestType)) = true;
+end
+
+idxTrain = ~idxTest;
+
+idxVariableSpecies = std(X(idxTrain, :), 0, 1, 'omitnan') > 0;
+X = X(:, idxVariableSpecies);
+modelSpeciesNames = speciesNames(idxVariableSpecies);
+modelSpeciesPhyla = speciesPhyla(idxVariableSpecies);
+modelSpeciesRoles = speciesRoles(idxVariableSpecies);
+modelSpeciesPlotNames = speciesPlotNames(idxVariableSpecies);
+
+nPredictors = size(X, 2);
+sampleWeights = local_clusterBalancedWeights(clustID, idxTrain, communityTypes, useClusterBalancedRidgeWeights);
+
+%% Predefined CV partition for lambda selection
+
+[XzAll, xMuAll, xSigmaAll] = local_standardizeTrain(X, idxTrain);
+nModelFolds = min(nFolds, sum(idxTrain));
+cv_inner = [];
+
+if blockedCV
+    nModelFolds = min(nModelFolds, numel(unique(cruiseID(idxTrain))));
+    [~, ~, ~, ~, cv_inner] = ml_blockedCV(XzAll(idxTrain, :), Y(idxTrain), ...
+        cruiseID(idxTrain), monthNum(idxTrain), nModelFolds);
+    nModelFolds = cv_inner.NumTestSets;
+end
+
+%% Initial ridge fit for feature scores
+
+[bestLambdaInitial, bestCVMSEInitial, cvMSEInitial] = local_selectRidgeLambda( ...
+    XzAll(idxTrain, :), Y(idxTrain), lambdaGrid, lambdaSelectionTolerance, ...
+    cv_inner, nModelFolds, sampleWeights(idxTrain));
+
+mdlInitial = fitrlinear(XzAll(idxTrain, :), Y(idxTrain), ...
+    'Learner', 'leastsquares', ...
+    'Regularization', 'ridge', ...
+    'Lambda', bestLambdaInitial, ...
+    'Weights', sampleWeights(idxTrain));
+
+betaStandardizedInitial = mdlInitial.Beta(:);
+betaUnstandardizedInitial = betaStandardizedInitial ./ xSigmaAll(:);
+
+switch thresholdSelectionMetric
+    case "coefficient"
+        featureScore = abs(betaStandardizedInitial);
+        yLabelDetail = '|standardized ridge beta|';
+    case "contribution"
+        featureScore = mean(abs(X(idxTrain, :) .* betaUnstandardizedInitial(:)'), 1, 'omitnan')';
+        yLabelDetail = 'mean |beta x transformed abundance|';
+    otherwise
+        error('Unknown thresholdSelectionMetric: %s.', thresholdSelectionMetric);
+end
+
+%% Threshold sweep
+
+nThresholds = numel(thresholdGrid);
+nTypes = numel(communityTypes);
+r2LogByType = nan(nThresholds, nTypes);
+rmseLogByType = nan(nThresholds, nTypes);
+nSelectedByThreshold = nan(nThresholds, 1);
+bestLambdaByThreshold = nan(nThresholds, 1);
+cvMSEByThreshold = nan(nThresholds, 1);
+
+for iThr = 1:nThresholds
+    threshold = thresholdGrid(iThr);
+    idxSelected = featureScore >= threshold;
+
+    if nnz(idxSelected) < minSelectedPredictors
+        continue
+    end
+
+    Xsel = X(:, idxSelected);
+    [XzSel, ~, ~] = local_standardizeTrain(Xsel, idxTrain);
+
+    [bestLambda, bestCVMSE] = local_selectRidgeLambda( ...
+        XzSel(idxTrain, :), Y(idxTrain), lambdaGrid, lambdaSelectionTolerance, ...
+        cv_inner, nModelFolds, sampleWeights(idxTrain));
+
+    mdl = fitrlinear(XzSel(idxTrain, :), Y(idxTrain), ...
+        'Learner', 'leastsquares', ...
+        'Regularization', 'ridge', ...
+        'Lambda', bestLambda, ...
+        'Weights', sampleWeights(idxTrain));
+
+    YhatOriginal = chlBackTransform(predict(mdl, XzSel));
+
+    nSelectedByThreshold(iThr) = nnz(idxSelected);
+    bestLambdaByThreshold(iThr) = bestLambda;
+    cvMSEByThreshold(iThr) = bestCVMSE;
+
+    for iType = 1:nTypes
+        idxTypeTest = clustID == communityTypes(iType) & idxTest & ...
+            Yoriginal > 0 & YhatOriginal > 0;
+
+        yObsLog = log10(Yoriginal(idxTypeTest));
+        yHatLog = log10(YhatOriginal(idxTypeTest));
+
+        r2LogByType(iThr, iType) = hf_stat_R2(yObsLog, yHatLog);
+        rmseLogByType(iThr, iType) = sqrt(mean((yObsLog - yHatLog).^2, 'omitnan'));
+    end
+end
+
+%% Output table
+
+tThresholdPerformance = table();
+tThresholdPerformance.Threshold = thresholdGrid(:);
+tThresholdPerformance.NSelectedPredictors = nSelectedByThreshold;
+tThresholdPerformance.BestLambda = bestLambdaByThreshold;
+tThresholdPerformance.CV_MSE_Transformed = cvMSEByThreshold;
+tThresholdPerformance.SelectionMetric = repmat(thresholdSelectionMetric, nThresholds, 1);
+tThresholdPerformance.InitialBestLambda = repmat(bestLambdaInitial, nThresholds, 1);
+tThresholdPerformance.InitialBestCVMSE = repmat(bestCVMSEInitial, nThresholds, 1);
+
+for iType = 1:nTypes
+    typeID = communityTypes(iType);
+    tThresholdPerformance.(['TestR2Log_Type' num2str(typeID)]) = r2LogByType(:, iType);
+    tThresholdPerformance.(['TestRMSELog_Type' num2str(typeID)]) = rmseLogByType(:, iType);
+end
+
+outTableFile = fullfile(HGP.Data.Path2ResultsData, ...
+    ['CoreSpeciesChlorophyllThresholdSweep_' char(thresholdSelectionMetric) '.csv']);
+writetable(tThresholdPerformance, outTableFile);
+
+%% Plot threshold sensitivity
+
+[fg, MaxFigure] = addFindFigure(['Threshold sweep ' char(thresholdSelectionMetric)], ...
+    MaxFigure, [20 80 1050 620], 'normal', 'on');
+clf(fg);
+fg.Color = 'w';
+
+ax = axes(fg);
+hold(ax, 'on');
+typeColors = lines(nTypes);
+
+for iType = 1:nTypes
+    plot(ax, thresholdGrid, r2LogByType(:, iType), '-o', ...
+        'Color', typeColors(iType, :), ...
+        'MarkerFaceColor', typeColors(iType, :), ...
+        'MarkerSize', 4, ...
+        'LineWidth', 1.2, ...
+        'DisplayName', sprintf('Type %d', communityTypes(iType)));
+end
+
+set(ax, 'XScale', 'log');
+yline(ax, 0, 'k-', 'LineWidth', 0.75);
+grid(ax, 'on');
+box(ax, 'on');
+xlabel(ax, sprintf('Feature-selection threshold (%s)', yLabelDetail));
+ylabel(ax, 'Hold-out test R^2_{log}');
+title(ax, sprintf('Ridge threshold sweep, metric = %s', thresholdSelectionMetric));
+legend(ax, 'Location', 'bestoutside');
+
+yyaxis(ax, 'right');
+plot(ax, thresholdGrid, nSelectedByThreshold, 'k--', ...
+    'LineWidth', 1.2, ...
+    'DisplayName', 'N predictors');
+ylabel(ax, 'Selected predictors');
+ax.YAxis(2).Color = [0 0 0];
+
+%% Final threshold model
+
+idxSelectedFinal = featureScore >= finalThreshold;
+
+if nnz(idxSelectedFinal) < minSelectedPredictors
+    error('Final threshold %.4g selected fewer than %d predictors.', finalThreshold, minSelectedPredictors);
+end
+
+Xsel = X(:, idxSelectedFinal);
+[XzSel, ~, xSigmaSel] = local_standardizeTrain(Xsel, idxTrain);
+
+[bestLambdaFinal, bestCVMSEFinal, cvMSEFinal] = local_selectRidgeLambda( ...
+    XzSel(idxTrain, :), Y(idxTrain), lambdaGrid, lambdaSelectionTolerance, ...
+    cv_inner, nModelFolds, sampleWeights(idxTrain));
+
+mdlFinal = fitrlinear(XzSel(idxTrain, :), Y(idxTrain), ...
+    'Learner', 'leastsquares', ...
+    'Regularization', 'ridge', ...
+    'Lambda', bestLambdaFinal, ...
+    'Weights', sampleWeights(idxTrain));
+
+YhatOriginalFinal = chlBackTransform(predict(mdlFinal, XzSel));
+betaStandardizedFinal = mdlFinal.Beta(:);
+betaUnstandardizedFinal = betaStandardizedFinal ./ xSigmaSel(:);
+
+modelSpeciesNamesFinal = modelSpeciesNames(idxSelectedFinal);
+modelSpeciesPhylaFinal = modelSpeciesPhyla(idxSelectedFinal);
+modelSpeciesRolesFinal = modelSpeciesRoles(idxSelectedFinal);
+modelSpeciesPlotNamesFinal = modelSpeciesPlotNames(idxSelectedFinal);
+
+fprintf('Final threshold %.4g selected %d predictors. Final lambda %.3g.\n', ...
+    finalThreshold, nnz(idxSelectedFinal), bestLambdaFinal);
+
+%% Final threshold contribution plot
+
+nSelectedFinal = nnz(idxSelectedFinal);
+medianContribution = nan(nSelectedFinal, nTypes);
+contributionQLow = nan(nSelectedFinal, nTypes);
+contributionQHigh = nan(nSelectedFinal, nTypes);
+
+for iType = 1:nTypes
+    idxType = clustID == communityTypes(iType);
+    sampleContribType = Xsel(idxType, :) .* betaUnstandardizedFinal(:)';
+
+    for iSpecies = 1:nSelectedFinal
+        vals = sampleContribType(:, iSpecies);
+        vals = vals(~isnan(vals));
+
+        if isempty(vals)
+            continue
+        end
+
+        Q = quantile(vals, contributionQuantileProbs);
+        contributionQLow(iSpecies, iType) = Q(1);
+        medianContribution(iSpecies, iType) = Q(2);
+        contributionQHigh(iSpecies, iType) = Q(3);
+    end
+end
+
+[fgB, MaxFigure] = addFindFigure('FS2 threshold selected species contributions', ...
+    MaxFigure, [24 332  1131 455], 'normal', 'on');
+
+barOpts = struct();
+barOpts.Figure = fgB;
+barOpts.ClearFigure = true;
+barOpts.XLabel = 'Community type';
+barOpts.YLabel = char(coreSpeciesData.GroupName);
+barOpts.Title = sprintf('Threshold-selected ridge contribution (threshold = %.4g, n = %d, lambda = %.3g)', ...
+    finalThreshold, nSelectedFinal, bestLambdaFinal);
+barOpts.ColorbarLabel = 'median unstandardized predictor \times beta';
+barOpts.RoleColors = roleClrs;
+barOpts.RoleShortNames = roleShortNames;
+barOpts.RoleOrder = {'Autotroph', 'Mixotroph', 'Zooplankton', 'Parasite', 'Recycler'};
+barOpts.FaceAlpha = 0.88;
+barOpts.XGridLineColor = [0.55 0.55 0.55];
+
+typeLabels = strings(size(communityTypes));
+
+for iType = 1:numel(communityTypes)
+    typeID = communityTypes(iType);
+    idxTypeTest = clustID == typeID & idxTest;
+    idxValid = idxTypeTest & Yoriginal > 0 & YhatOriginalFinal > 0;
+    r2LogType = hf_stat_R2(log10(Yoriginal(idxValid)), log10(YhatOriginalFinal(idxValid)));
+    rCorr = corr(log10(Yoriginal(idxValid)), log10(YhatOriginalFinal(idxValid)));
+    typeLabels(iType) = sprintf('Type %d \\newlineR^2_{log}=%.2f \\newline r_{log}=%.2f', typeID, r2LogType, rCorr);
+end
+
+plotGroupedIntervalBarsHor( ...
+    medianContribution, contributionQLow, contributionQHigh, ...
+    typeLabels, modelSpeciesPlotNamesFinal, ...
+    modelSpeciesPhylaFinal, modelSpeciesRolesFinal, barOpts);
+
+%% Final threshold test predicted/observed diagnostics
+
+tPredFinal = table();
+tPredFinal.ClustID = clustID;
+tPredFinal.ChlorophyllObserved = Yoriginal;
+tPredFinal.ChlorophyllPredicted = YhatOriginalFinal;
+tPredFinal.DataSet = strings(size(Y));
+tPredFinal.DataSet(idxTrain) = "train";
+tPredFinal.DataSet(idxTest) = "test";
+
+[fgPred, MaxFigure] = addFindFigure('FS2 threshold selected species observed predicted test', ...
+    MaxFigure, [10, 20, 1100 650], 'normal', 'on');
+clf(fgPred);
+fgPred.Color = 'w';
+
+tlPred = tiledlayout(fgPred, 'flow', 'Padding', 'compact', 'TileSpacing', 'compact');
+idxSet = tPredFinal.DataSet == "test";
+predAxisLim = local_positivePlotLimits(tPredFinal.ChlorophyllObserved(idxSet), tPredFinal.ChlorophyllPredicted(idxSet));
+
+for iType = 1:numel(communityTypes)
+    typeID = communityTypes(iType);
+    axPred = nexttile(tlPred);
+    idxType = tPredFinal.ClustID == typeID & idxSet;
+    idxPlot = idxType & tPredFinal.ChlorophyllObserved > 0 & tPredFinal.ChlorophyllPredicted > 0;
+
+    scatter(axPred, tPredFinal.ChlorophyllPredicted(idxPlot), ...
+        tPredFinal.ChlorophyllObserved(idxPlot), 22, ...
+        'filled', ...
+        'MarkerFaceColor', [0.20 0.38 0.80], ...
+        'MarkerFaceAlpha', 0.65, ...
+        'MarkerEdgeColor', [0.25 0.25 0.25]);
+    hold(axPred, 'on');
+
+    if all(isfinite(predAxisLim)) && predAxisLim(2) > predAxisLim(1)
+        plot(axPred, predAxisLim, predAxisLim, 'k-', 'LineWidth', 0.75);
+    end
+
+    yObsO = tPredFinal.ChlorophyllObserved(idxType);
+    yHatO = tPredFinal.ChlorophyllPredicted(idxType);
+    r2Log = hf_stat_R2(log10(yObsO), log10(yHatO));
+    rLog = local_corrValue(log10(yObsO), log10(yHatO));
+
+    set(axPred, 'XScale', 'log', 'YScale', 'log');
+    xlim(axPred, predAxisLim);
+    ylim(axPred, predAxisLim);
+    axis(axPred, 'square');
+    grid(axPred, 'on');
+    xlabel(axPred, 'Predicted chlorophyll a');
+    ylabel(axPred, 'Observed chlorophyll a');
+    title(axPred, sprintf('test Type %d, R^2_{log}=%.2f, r_{log}=%.2f', ...
+        typeID, r2Log, rLog));
+end
+
+disp('Finished.');
+
+function [bestLambda, bestCVMSE, cvMSE] = local_selectRidgeLambda(Xtrain, Ytrain, lambdaGrid, lambdaSelectionTolerance, cv_inner, nModelFolds, sampleWeights)
+
+    if ~isempty(cv_inner)
+        cvMdl = fitrlinear(Xtrain, Ytrain, ...
+            'Learner', 'leastsquares', ...
+            'Regularization', 'ridge', ...
+            'CVPartition', cv_inner, ...
+            'Lambda', lambdaGrid, ...
+            'Weights', sampleWeights);
+    else
+        cvMdl = fitrlinear(Xtrain, Ytrain, ...
+            'Learner', 'leastsquares', ...
+            'Regularization', 'ridge', ...
+            'KFold', nModelFolds, ...
+            'Lambda', lambdaGrid, ...
+            'Weights', sampleWeights);
+    end
+
+    cvMSE = kfoldLoss(cvMdl);
+    minCVMSE = min(cvMSE);
+    idxAllowedLambda = cvMSE <= minCVMSE * (1 + lambdaSelectionTolerance);
+    idxBestLambda = find(idxAllowedLambda, 1, 'last');
+    bestLambda = lambdaGrid(idxBestLambda);
+    bestCVMSE = cvMSE(idxBestLambda);
+end
+
+function X = local_powerTransformAbundance(X, alpha)
+
+    X = double(X);
+
+    if any(X(:) < 0)
+        error('Power transform requires non-negative abundance values.');
+    end
+
+    X = X .^ alpha;
+end
+
+function Xclr = local_clrTransformAbundance(X)
+
+    X = double(X);
+    pseudocount = 1e-6;
+
+    if any(X(:) < 0)
+        error('CLR transform requires non-negative abundance values.');
+    end
+
+    X = X + pseudocount;
+    rowSums = sum(X, 2, 'omitnan');
+
+    if any(rowSums <= 0 | isnan(rowSums))
+        error('CLR transform found rows with non-positive abundance sums.');
+    end
+
+    X = X ./ rowSums;
+    logX = log10(X);
+    Xclr = logX - mean(logX, 2, 'omitnan');
+end
+
+function [Xz, xMu, xSigma] = local_standardizeTrain(X, idxTrain)
+
+    xMu = mean(X(idxTrain, :), 1, 'omitnan');
+    xSigma = std(X(idxTrain, :), 0, 1, 'omitnan');
+    xSigma(xSigma == 0 | isnan(xSigma)) = 1;
+    Xz = (X - xMu) ./ xSigma;
+end
+
+function sampleWeights = local_clusterBalancedWeights(clustID, idxTrain, communityTypes, useClusterBalancedRidgeWeights)
+
+    sampleWeights = ones(size(clustID));
+
+    if ~useClusterBalancedRidgeWeights
+        return
+    end
+
+    sampleWeights(:) = 0;
+
+    for iType = 1:numel(communityTypes)
+        idxTypeTrain = clustID == communityTypes(iType) & idxTrain;
+
+        if any(idxTypeTrain)
+            sampleWeights(idxTypeTrain) = 1 / sum(idxTypeTrain);
+        end
+    end
+
+    sampleWeights(idxTrain) = sampleWeights(idxTrain) ./ mean(sampleWeights(idxTrain), 'omitnan');
+    sampleWeights(~idxTrain) = 1;
+end
+
+function r = local_corrValue(y, yHat)
+
+    idx = ~isnan(y) & ~isnan(yHat) & isfinite(y) & isfinite(yHat);
+    y = y(idx);
+    yHat = yHat(idx);
+
+    if numel(y) < 2
+        r = NaN;
+        return
+    end
+
+    r = corr(y(:), yHat(:), 'Rows', 'complete');
+end
+
+function lim = local_positivePlotLimits(varargin)
+
+    vals = [];
+
+    for iArg = 1:nargin
+        x = varargin{iArg};
+        vals = [vals; x(:)]; %#ok<AGROW>
+    end
+
+    vals = vals(vals > 0 & isfinite(vals));
+
+    if isempty(vals)
+        lim = [1e-3 1];
+        return
+    end
+
+    lim = [min(vals) max(vals)];
+
+    if lim(1) == lim(2)
+        lim = lim .* [0.8 1.2];
+    end
+
+    lim = 10 .^ (log10(lim) + [-0.08 0.08]);
+end

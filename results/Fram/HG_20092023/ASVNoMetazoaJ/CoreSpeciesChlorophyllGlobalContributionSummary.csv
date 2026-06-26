@@ -1,0 +1,2 @@
+NSamples,NPredictors,KFolds,LinearRegularization,BoxCoxLambdaChl,AbundanceTransform,AbundanceInputScale,AbundancePseudoCount,CLRMaxAbsRowSum,BestLambda,CV_RMSE_Transformed,R2_Transformed,RMSE_Transformed,R2_Original,RMSE_Original
+724,43,5,ridge,0.5,power05,proportions,0,NaN,0.123284673944207,0.525471711827021,0.719963228448543,0.490204055925334,0.620095227190886,0.555466508539037

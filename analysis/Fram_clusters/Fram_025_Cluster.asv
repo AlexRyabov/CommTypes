@@ -1,0 +1,56 @@
+%use 
+proj_Initialize;
+
+%% Load data
+[Data, DI] = dt_loadData(HGP, []);
+tSamplesNorm = Data.tSamplesNorm;
+tStPredictors = Data.tStPredictors;
+tDMC = readtable(fullfile(HGP.Data.Path2ResultsData, 'Samples_DMC.xlsx'));
+
+%%
+if 0 % Radius clustering
+    clust_model = radius_cluster(tDMC{:, HGP.dmCluster.DMCoords}, 'Radius',HGP.dmCluster.rad_clust, 'Manner', 'approx', 'ReturnCenters', true);
+    tDMC.ClustID = clust_model.labels;
+else %gaussian clustering
+    opts = statset('MaxIter', 1000, 'TolFun', 1e-6);
+    gm = fitgmdist(tDMC{:, HGP.dmCluster.DMCoords}, 9, ...
+        'CovarianceType',  'diagonal', ...
+        'SharedCovariance', true, ...
+        'RegularizationValue', 1e-6, ...
+        'Start','plus', ...
+        'Replicates', 10, ...
+        'Options', opts);
+    clust_model.gmm = gm;
+    clust_model.K = gm
+    [P, ~] = posterior(gm, X);
+    BIC = gm.BIC;
+    ICL = BIC + sum(P(:) .* log(max(P(:), eps)));
+
+    rec(row).BIC   = BIC;
+    rec(row).ICL   = ICL;
+    rec(row).nlogL = gm.NegativeLogLikelihood;
+    rec(row).Status= "ok";
+end
+
+writenewtable(tDMC, fullfile(HGP.Data.Path2ResultsData, 'Samples_DMC_clustID.xlsx'));
+
+save(fullfile(HGP.Data.Path2ResultsData, 'clust_model.mat'), 'clust_model');
+
+%%
+fg1 = f_MakeFigure(MaxFigure, [-1, -1, 500, 400]);
+clrs = f_Clrs_fresh(clust_model.K);
+hold on
+for k = 1:clust_model.K
+    idx = (clust_model.labels == k);
+    scatter3(tDMC{idx,1}, tDMC{idx,2}, tDMC{idx,3}, ...
+             40, repmat(clrs(k,:), sum(idx),1), 'filled', 'MarkerEdgeColor', 'k');
+end
+legend('Location','best')
+hold off
+% 4) check how compact are the clusters 
+fprintf('K=%d, median rad90=%.3g, sizes in [%d, %d]\n', ...
+    clust_model.K, median(clust_model.rad90), min(clust_model.sizes), max(clust_model.sizes));
+
+title(sprintf('Radius clustering (R=%.3g, K=%d)', clust_model.radius, clust_model.K));
+
+%%
