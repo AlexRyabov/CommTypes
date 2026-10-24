@@ -1,5 +1,0 @@
-Fram_010_DM
-Fram_020_Clust
-Fram_025_Clust
-Fram_026_DMClustPlot
-Fram_030_DMClustDist

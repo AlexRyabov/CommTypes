@@ -1,0 +1,13 @@
+function mdl = ml_train_RF(X, Y, params, varargin)
+
+ tTree = templateTree( ...
+    'MinLeafSize',          params.MinLeafSize, ...
+    'NumVariablesToSample', params.NumPredictorsToSample);  % 
+
+mdl = fitcensemble(X, Y, ...
+    'Method',           'Bag', ...                   % bagging = TreeBagger
+    'NumLearningCycles', params.NumTrees, ...        % same as NumTrees
+    'Learners',         tTree, ...
+    'Type',             'Classification',  varargin{:});           % optional, usually inferred from Y
+
+end
